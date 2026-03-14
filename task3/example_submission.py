@@ -15,7 +15,7 @@ ENDPOINT = "task3"
 API_TOKEN = os.getenv("TEAM_TOKEN")
 SERVER_URL = os.getenv("SERVER_URL")
 
-CSV_FILE="data/out/load_example_submission.csv"
+CSV_FILE="data/out/task3_submission.csv"
 
 
 def generate_mock_submission():

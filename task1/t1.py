@@ -160,33 +160,33 @@ def main():
 
     # 7. Binaryzacja i zapis do DataFrame submisji
     y_pred_bin = (y_probs_consistent >= 0.5).astype(int)
-    
-    # Przypisanie wyników do kolumn
-    submission_df.loc[:, labels_columns] = y_pred_bin
+    for i, col in enumerate(labels_columns):
+        submission_df[col] = y_pred_bin[:, i]
 
-    # --- ZMIANY TUTAJ ---
+    print("Przykładowe predykcje:")
+    print(submission_df.head())
 
-    # 8. Wyświetlanie wyników w konsoli
-    print("\n" + "="*30)
-    print("PODSUMOWANIE PREDYKCJI:")
-    print("="*30)
-    
-    # Wyświetlamy pierwsze 5 wierszy (tylko SMILES i kilka pierwszych etykiet dla czytelności)
-    cols_to_show = ["SMILES"] + list(labels_columns[:5])
-    print("Fragment tabeli wynikowej:")
-    print(submission_df[cols_to_show].head())
+    # 8. Wysłanie na serwer
+    headers = {"X-API-Token": API_TOKEN}
 
-    # Statystyki: ile jedynek przypisano ogółem?
-    total_positives = y_pred_bin.sum()
-    print(f"\nŁączna liczba przypisanych klas (jedynek): {total_positives}")
-    print(f"Średnia liczba klas na cząsteczkę: {total_positives / len(submission_df):.2f}")
+    buffer = io.BytesIO()
+    submission_df.to_parquet(buffer, index=False)
+    buffer.seek(0)
 
-    # 9. Zapis lokalny do pliku (zamiast wysyłki)
-    output_filename = "moje_wyniki_predykcji.parquet"
-    submission_df.to_parquet(output_filename, index=False)
-    
-    print(f"\n[OK] Wyniki zostały zapisane lokalnie w pliku: {output_filename}")
-    print("="*30)
+    print("Wysyłanie predykcji na serwer...")
+    response = requests.post(
+        f"{SERVER_URL}/{ENDPOINT}",
+        files={"parquet_file": buffer},
+        headers=headers,
+    )
+
+    try:
+        data = response.json()
+    except Exception:
+        data = response.text
+
+    print("Response:", response.status_code, data)
+
 
 if __name__ == "__main__":
     main()

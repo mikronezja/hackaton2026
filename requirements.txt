@@ -4,10 +4,16 @@ opencv-python
 scikit-learn
 pillow
 scipy
-pytorch
+torch
 torchvision
 matplotlib
 requests
 python-dotenv
 pyarrow
 dotenv
+rdkit>=2023.3.1
+scikit-fingerprints
+pronto
+fastparquet
+scikit-fingerprints
+lightgbm

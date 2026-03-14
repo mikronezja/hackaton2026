@@ -1,24 +1,34 @@
+import io
+import os
 import pandas as pd
-import networkx as nx
 import numpy as np
-from skfp.model_selection import scaffold_train_test_split
+import networkx as nx
+import requests
+from dotenv import load_dotenv
 from sklearn.pipeline import Pipeline, FeatureUnion
 from sklearn.multioutput import MultiOutputClassifier
 from lightgbm import LGBMClassifier
+from skfp.model_selection import scaffold_train_test_split
 from skfp.preprocessing import MolFromSmilesTransformer, MolStandardizer
 from skfp.fingerprints import ECFPFingerprint, MACCSFingerprint, TopologicalTorsionFingerprint
-from sklearn.metrics import f1_score
+
+# Load .env file if present
+load_dotenv()
+
+ENDPOINT = "task1"
+API_TOKEN = os.getenv("TEAM_TOKEN")
+SERVER_URL = os.getenv("SERVER_URL")
+
+TRAIN_FILE = "chebi_dataset_train.parquet"
+TEST_FILE = "chebi_submission_example.parquet"
+OBO_FILE = "chebi_classes.obo"
 
 
 # ==========================================
-# 1. FUNKCJE POMOCNICZE
+# FUNKCJE POMOCNICZE (z pipeline2)
 # ==========================================
 
 def build_hierarchy_map(obo_path, column_names):
-    """
-    Tworzy mapę relacji rodzic-dziecko opartą na indeksach kolumn.
-    column_names: lista nazw kolumn z etykietami (bez SMILES i ID).
-    """
     id_to_idx = {name: i for i, name in enumerate(column_names)}
 
     dag = nx.DiGraph()
@@ -35,7 +45,6 @@ def build_hierarchy_map(obo_path, column_names):
                 if parent_id in id_to_idx:
                     dag.add_edge(id_to_idx[parent_id], id_to_idx[current_id])
 
-    # Sortowanie topologiczne (od szczegółu do ogółu)
     sorted_indices = list(nx.topological_sort(dag))[::-1]
 
     parent_child_map = {}
@@ -47,32 +56,12 @@ def build_hierarchy_map(obo_path, column_names):
     return parent_child_map, sorted_indices
 
 
-def calculate_inconsistencies(y_probs, parent_child_map):
-    """
-    Oblicza średnią liczbę niespójności na próbkę.
-    Niespójność to sytuacja, gdy P(dziecko) > P(rodzic).
-    """
-    inconsistencies = 0
-    n_samples = y_probs.shape[0]
-
-    for child_idx, parents in parent_child_map.items():
-        for parent_idx in parents:
-            violations = np.sum(y_probs[:, child_idx] > y_probs[:, parent_idx] + 1e-6)
-            inconsistencies += violations
-
-    return inconsistencies / n_samples
-
-
 def fix_hierarchy_consistency(y_probs, parent_child_map, sorted_classes):
-    """
-    Naprawia prawdopodobieństwa od dołu do góry (od liści do korzenia).
-    """
     y_consistent = y_probs.copy()
 
     for child_idx in sorted_classes:
         if child_idx in parent_child_map:
             for parent_idx in parent_child_map[child_idx]:
-                # Rodzic musi mieć P >= dziecko
                 y_consistent[:, parent_idx] = np.maximum(
                     y_consistent[:, parent_idx],
                     y_consistent[:, child_idx]
@@ -80,92 +69,97 @@ def fix_hierarchy_consistency(y_probs, parent_child_map, sorted_classes):
     return y_consistent
 
 
-def evaluate_model(pipeline, X_test, y_test, parent_child_map, sorted_idx):
-    print("Generowanie predykcji (to może chwilę potrwać)...")
+# ==========================================
+# GŁÓWNA LOGIKA
+# ==========================================
 
-    # 1. Pobranie prawdopodobieństw z modelu
-    probs_list = pipeline.predict_proba(X_test)
+def main():
+    if not API_TOKEN:
+        raise ValueError("TEAM_TOKEN not provided. Define TEAM_TOKEN in .env")
+    if not SERVER_URL:
+        raise ValueError("SERVER_URL not defined. Define SERVER_URL in .env")
 
-    # 2. Przekształcenie listy na macierz (n_samples, 500_classes)
+    # 1. Wczytanie danych treningowych
+    print("Wczytywanie danych treningowych...")
+    train_df = pd.read_parquet(TRAIN_FILE)
+
+    smiles_train = train_df["SMILES"].values
+    labels_columns = train_df.drop(columns=["SMILES", "mol_id"]).columns
+    y_train = train_df[labels_columns].values
+
+    # 2. Budowa mapy hierarchii
+    print("Budowanie mapy hierarchii...")
+    pc_map, sorted_idx = build_hierarchy_map(OBO_FILE, labels_columns)
+
+    # 3. Budowa i trening modelu
+    fps_union = FeatureUnion([
+        ("ecfp", ECFPFingerprint(n_jobs=-1)),
+        ("maccs", MACCSFingerprint(n_jobs=-1)),
+        ("tt", TopologicalTorsionFingerprint(n_jobs=-1))
+    ])
+
+    lgbm = LGBMClassifier(class_weight="balanced", n_jobs=-1, random_state=0, verbose=-1)
+
+    pipeline = Pipeline([
+        ("mol_from_smiles", MolFromSmilesTransformer()),
+        ("mol_standardizer", MolStandardizer()),
+        ("fps_union", fps_union),
+        ("classifier", MultiOutputClassifier(lgbm))
+    ])
+
+    print("Trenowanie modelu na pełnym zbiorze treningowym...")
+    pipeline.fit(smiles_train, y_train)
+    print("Trenowanie zakończone!")
+
+    # 4. Wczytanie danych do predykcji (plik submisji)
+    try:
+        submission_df = pd.read_parquet(TEST_FILE)
+    except Exception as e:
+        raise FileExistsError(f"Parquet file did not load properly, error: {e}")
+
+    print(submission_df)
+
+    smiles_test = submission_df["SMILES"].values
+
+    # 5. Generowanie predykcji
+    print("Generowanie predykcji...")
+    probs_list = pipeline.predict_proba(smiles_test)
     y_probs = np.column_stack([p[:, 1] for p in probs_list])
 
-    # 3. Sprawdzenie niespójności PRZED naprawą
-    inconsistencies_before = calculate_inconsistencies(y_probs, parent_child_map)
-    print(f"Średnia liczba niespójności na cząsteczkę (przed naprawą): {inconsistencies_before:.4f}")
-
-    # 4. Naprawa hierarchii
+    # 6. Naprawa spójności hierarchii
     print("Naprawianie spójności hierarchii...")
-    y_probs_consistent = fix_hierarchy_consistency(y_probs, parent_child_map, sorted_idx)
+    y_probs_consistent = fix_hierarchy_consistency(y_probs, pc_map, sorted_idx)
 
-    # 5. Sprawdzenie niespójności PO naprawie (powinno być równe 0.0)
-    inconsistencies_after = calculate_inconsistencies(y_probs_consistent, parent_child_map)
-    print(f"Średnia liczba niespójności na cząsteczkę (po naprawie): {inconsistencies_after:.4f}")
-
-    # 6. Binaryzacja predykcji (standardowy próg 0.5)
+    # 7. Binaryzacja i zapis do DataFrame submisji
     y_pred_bin = (y_probs_consistent >= 0.5).astype(int)
 
-    # 7. Obliczenie końcowego F1 Macro
-    macro_f1 = f1_score(y_test, y_pred_bin, average='macro')
-    print(f"\n====================================")
-    print(f"⭐ Twój Macro-averaged F1 Score: {macro_f1:.4f} ⭐")
-    print(f"====================================")
+    for i, col in enumerate(labels_columns):
+        submission_df[col] = y_pred_bin[:, i]
 
-    return y_probs_consistent
+    print("Przykładowe predykcje:")
+    print(submission_df.head())
 
+    # 8. Wysłanie na serwer
+    headers = {"X-API-Token": API_TOKEN}
 
-# ==========================================
-# 2. ŁADOWANIE I PODZIAŁ DANYCH
-# ==========================================
+    buffer = io.BytesIO()
+    submission_df.to_parquet(buffer, index=False)
+    buffer.seek(0)
 
-train_df = pd.read_parquet('chebi_dataset_train.parquet')
+    print("Wysyłanie predykcji na serwer...")
+    response = requests.post(
+        f"{SERVER_URL}/{ENDPOINT}",
+        files={"parquet_file": buffer},
+        headers=headers
+    )
 
-smiles = train_df["SMILES"].values
-labels_columns = train_df.drop(columns=["SMILES", "mol_id"]).columns
-y = train_df[labels_columns].values
+    try:
+        data = response.json()
+    except Exception:
+        data = response.text
 
-X_train, X_test, y_train, y_test = scaffold_train_test_split(
-    smiles,
-    y,
-    test_size=0.2,
-)
-
-print(f"Liczba cząsteczek w treningu: {len(X_train)}")
-print(f"Liczba cząsteczek w teście: {len(X_test)}")
-
-
-# ==========================================
-# 3. BUDOWA MAPY HIERARCHII
-# ==========================================
-
-pc_map, sorted_idx = build_hierarchy_map('chebi_classes.obo', labels_columns)
+    print("Response:", response.status_code, data)
 
 
-# ==========================================
-# 4. BUDOWA I TRENING MODELU
-# ==========================================
-
-fps_union = FeatureUnion([
-    ("ecfp", ECFPFingerprint(n_jobs=-1)),
-    ("maccs", MACCSFingerprint(n_jobs=-1)),
-    ("tt", TopologicalTorsionFingerprint(n_jobs=-1))
-])
-
-lgbm = LGBMClassifier(class_weight="balanced", n_jobs=-1, random_state=0, verbose=-1)
-
-pipeline = Pipeline([
-    ("mol_from_smiles", MolFromSmilesTransformer()),
-    ("mol_standardizer", MolStandardizer()),
-    ("fps_union", fps_union),
-    ("classifier", MultiOutputClassifier(lgbm))
-])
-
-print("Rozpoczynam trenowanie modelu...")
-pipeline.fit(X_train, y_train)
-print("Trenowanie zakończone!")
-
-
-# ==========================================
-# 5. EWALUACJA
-# ==========================================
-
-y_test_probs = evaluate_model(pipeline, X_test, y_test, pc_map, sorted_idx)
+if __name__ == "__main__":
+    main()

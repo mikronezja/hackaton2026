@@ -3,6 +3,7 @@ import os
 import pandas as pd
 import numpy as np
 import networkx as nx
+from rdkit import Chem
 import requests
 from dotenv import load_dotenv
 from sklearn.pipeline import Pipeline, FeatureUnion
@@ -79,9 +80,28 @@ def main():
     if not SERVER_URL:
         raise ValueError("SERVER_URL not defined. Define SERVER_URL in .env")
 
-    # 1. Wczytanie danych treningowych
     print("Wczytywanie danych treningowych...")
     train_df = pd.read_parquet(TRAIN_FILE)
+
+    # --- POPRAWKA: Filtrowanie błędnych SMILES ---
+    print("Sprawdzanie poprawności SMILES...")
+    initial_count = len(train_df)
+    
+    # Funkcja sprawdzająca, czy SMILES jest poprawny dla RDKit
+    def is_valid_smiles(s):
+        try:
+            m =Chem.MolFromSmiles(s)
+            return m is not None
+        except:
+            return False
+
+    # Filtrujemy DataFrame
+    train_df = train_df[train_df["SMILES"].apply(is_valid_smiles)]
+    
+    final_count = len(train_df)
+    if initial_count != final_count:
+        print(f"Usunięto {initial_count - final_count} niepoprawnych kodów SMILES.")
+    # --------------------------------------------
 
     smiles_train = train_df["SMILES"].values
     labels_columns = train_df.drop(columns=["SMILES", "mol_id"]).columns

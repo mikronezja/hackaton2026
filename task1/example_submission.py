@@ -14,7 +14,7 @@ ENDPOINT = "task1"
 
 API_TOKEN = os.getenv("TEAM_TOKEN")
 SERVER_URL = os.getenv("SERVER_URL")
-PARQUET_FILE = "moje_wyniki_predykcji.parquet"
+PARQUET_FILE = "moje_predykcje.parquet"
 
 def main():
     if not API_TOKEN:

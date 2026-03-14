@@ -55,6 +55,20 @@ Do **not** commit your `.env` file to version control.
 Keep your `TEAM_TOKEN` private.
 
 ---
+# Rate Limiting
+
+Each task has a **minimum wait time between submissions** to prevent server overload.  
+Please make sure to respect these limits:
+
+| Task | Minimum Interval Between Submissions |
+|------|------------------------------------|
+| `task1` | 450 seconds (7.5 minutes) |
+| `task2_public` | 2700 seconds (45 minutes) |
+| `task2_practice` | 600 seconds (10 minutes) |
+| `task3` | 450 seconds (7.5 minutes) |
+| `task4` | 450 seconds (7.5 minutes) |
+
+---
 
 # Submitting Results
 
@@ -111,4 +125,5 @@ This means that even if an earlier submission achieved a higher public score, th
 
 # Troubleshooting
 
+If you notice any strange behavior or errors, please contact the **Infrastructure Team** on Discord or on-site.
 If you notice any strange behavior or errors, please contact the **Infrastructure Team** on Discord or on-site.

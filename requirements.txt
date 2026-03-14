@@ -3,3 +3,5 @@ requests
 python-dotenv
 pyarrow
 numpy
+requests
+dotenv

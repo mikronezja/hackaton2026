@@ -107,15 +107,20 @@ def main():
     pc_map, sorted_idx = build_hierarchy_map(OBO_FILE, labels_columns)
 
     # 3. Budowa i trening modelu
+    # Dodajemy n_jobs=-1 do transformatorów, żeby cząsteczki przetwarzać równolegle
+    
     fps_union = FeatureUnion([
         ("ecfp", ECFPFingerprint(n_jobs=-1)),
         ("maccs", MACCSFingerprint(n_jobs=-1)),
         ("tt", TopologicalTorsionFingerprint(n_jobs=-1)),
     ])
 
+    # UWAGA: W MultiOutputClassifier najlepiej ustawić n_jobs=-1 tutaj,
+    # a w samym LGBMClassifier zostawić n_jobs=1. 
+    # Dzięki temu trenujemy wiele klas jednocześnie, zamiast jednej klasy wieloma wątkami.
     lgbm = LGBMClassifier(
         class_weight="balanced",
-        n_jobs=1,          # każdy model jednowątkowy
+        n_jobs=1,          
         random_state=0,
         verbose=-1,
         n_estimators=100,
@@ -124,13 +129,14 @@ def main():
     )
 
     pipeline = Pipeline([
-        ("mol_from_smiles", MolFromSmilesTransformer()),
-        ("mol_standardizer", MolStandardizer()),
+        # Tutaj również dodajemy n_jobs=-1, jeśli biblioteka skfp to wspiera w danej wersji
+        ("mol_from_smiles", MolFromSmilesTransformer(n_jobs=-1)),
+        ("mol_standardizer", MolStandardizer(n_jobs=-1)),
         ("fps_union", fps_union),
-        ("classifier", MultiOutputClassifier(lgbm, n_jobs=-1)),  # zrównoleglenie po klasach
+        ("classifier", MultiOutputClassifier(lgbm, n_jobs=-1)), 
     ])
 
-    print("Trenowanie modelu na pełnym zbiorze treningowym...")
+    print(f"Trenowanie modelu równolegle na {os.cpu_count()} rdzeniach...")
     pipeline.fit(smiles_train, y_train)
     print("Trenowanie zakończone!")
 
@@ -154,33 +160,33 @@ def main():
 
     # 7. Binaryzacja i zapis do DataFrame submisji
     y_pred_bin = (y_probs_consistent >= 0.5).astype(int)
-    for i, col in enumerate(labels_columns):
-        submission_df[col] = y_pred_bin[:, i]
+    
+    # Przypisanie wyników do kolumn
+    submission_df.loc[:, labels_columns] = y_pred_bin
 
-    print("Przykładowe predykcje:")
-    print(submission_df.head())
+    # --- ZMIANY TUTAJ ---
 
-    # 8. Wysłanie na serwer
-    headers = {"X-API-Token": API_TOKEN}
+    # 8. Wyświetlanie wyników w konsoli
+    print("\n" + "="*30)
+    print("PODSUMOWANIE PREDYKCJI:")
+    print("="*30)
+    
+    # Wyświetlamy pierwsze 5 wierszy (tylko SMILES i kilka pierwszych etykiet dla czytelności)
+    cols_to_show = ["SMILES"] + list(labels_columns[:5])
+    print("Fragment tabeli wynikowej:")
+    print(submission_df[cols_to_show].head())
 
-    buffer = io.BytesIO()
-    submission_df.to_parquet(buffer, index=False)
-    buffer.seek(0)
+    # Statystyki: ile jedynek przypisano ogółem?
+    total_positives = y_pred_bin.sum()
+    print(f"\nŁączna liczba przypisanych klas (jedynek): {total_positives}")
+    print(f"Średnia liczba klas na cząsteczkę: {total_positives / len(submission_df):.2f}")
 
-    print("Wysyłanie predykcji na serwer...")
-    response = requests.post(
-        f"{SERVER_URL}/{ENDPOINT}",
-        files={"parquet_file": buffer},
-        headers=headers,
-    )
-
-    try:
-        data = response.json()
-    except Exception:
-        data = response.text
-
-    print("Response:", response.status_code, data)
-
+    # 9. Zapis lokalny do pliku (zamiast wysyłki)
+    output_filename = "moje_wyniki_predykcji.parquet"
+    submission_df.to_parquet(output_filename, index=False)
+    
+    print(f"\n[OK] Wyniki zostały zapisane lokalnie w pliku: {output_filename}")
+    print("="*30)
 
 if __name__ == "__main__":
     main()
